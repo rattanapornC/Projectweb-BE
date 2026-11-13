@@ -113,40 +113,88 @@ type mdChapterResp struct {
 }
 
 func (s *Store) SyncChapters(ctx context.Context, mangaID string) error {
-	q := url.Values{}
-	q.Set("limit", "500")
-	q.Add("translatedLanguage[]", "en")
-	q.Add("translatedLanguage[]", "th")
-	q.Set("order[chapter]", "desc")
-	q.Add("includes[]", "scanlation_group")
-	var r mdChapterResp
-	if e := mdGet(ctx, "/manga/"+url.PathEscape(mangaID)+"/feed?"+q.Encode(), &r); e != nil {
-		return e
-	}
-	for _, x := range r.Data {
-		var group *string
-		for _, rel := range x.Relationships {
-			if rel.Type == "scanlation_group" {
-				v := rel.ID
-				group = &v
+	const limit = 500
+
+	offset := 0
+
+	for {
+		q := url.Values{}
+		q.Set("limit", fmt.Sprint(limit))
+		q.Set("offset", fmt.Sprint(offset))
+		q.Set("order[chapter]", "desc")
+		q.Add("includes[]", "scanlation_group")
+
+		// ไม่กำหนด translatedLanguage[]
+		// เพื่อดึงตอนทุกภาษา
+
+		var r mdChapterResp
+
+		endpoint := "/manga/" +
+			url.PathEscape(mangaID) +
+			"/feed?" + q.Encode()
+
+		if err := mdGet(ctx, endpoint, &r); err != nil {
+			return err
+		}
+
+		for _, x := range r.Data {
+			var group *string
+
+			for _, rel := range x.Relationships {
+				if rel.Type == "scanlation_group" {
+					v := rel.ID
+					group = &v
+					break
+				}
+			}
+
+			var number, title *string
+
+			if x.Attributes.Chapter != "" {
+				v := x.Attributes.Chapter
+				number = &v
+			}
+
+			if x.Attributes.Title != "" {
+				v := x.Attributes.Title
+				title = &v
+			}
+
+			_, err := s.Pool.Exec(
+				ctx,
+				`INSERT INTO chapters
+				(id, manga_id, chapter_number, title,
+				 translated_language, scanlation_group, is_free)
+				VALUES ($1,$2,$3,$4,$5,$6,true)
+				ON CONFLICT(id) DO UPDATE SET
+					chapter_number = EXCLUDED.chapter_number,
+					title = EXCLUDED.title,
+					translated_language = EXCLUDED.translated_language,
+					scanlation_group = EXCLUDED.scanlation_group`,
+				x.ID,
+				mangaID,
+				number,
+				title,
+				x.Attributes.TranslatedLanguage,
+				group,
+			)
+
+			if err != nil {
+				return err
 			}
 		}
-		var number, title *string
-		if x.Attributes.Chapter != "" {
-			v := x.Attributes.Chapter
-			number = &v
+
+		// ถ้าดึงได้น้อยกว่า limit แสดงว่าถึงหน้าสุดท้ายแล้ว
+		if len(r.Data) < limit {
+			break
 		}
-		if x.Attributes.Title != "" {
-			v := x.Attributes.Title
-			title = &v
-		}
-		_, e := s.Pool.Exec(ctx, `insert into chapters(id,manga_id,chapter_number,title,translated_language,scanlation_group,is_free) values($1,$2,$3,$4,$5,$6,true) on conflict(id) do update set chapter_number=excluded.chapter_number,title=excluded.title,translated_language=excluded.translated_language,scanlation_group=excluded.scanlation_group`, x.ID, mangaID, number, title, x.Attributes.TranslatedLanguage, group)
-		if e != nil {
-			return e
-		}
+
+		offset += len(r.Data)
 	}
+
 	return nil
 }
+
 func (s *Store) Pages(ctx context.Context, id string) ([]string, error) {
 	var r struct {
 		BaseURL string `json:"baseUrl"`
@@ -156,12 +204,41 @@ func (s *Store) Pages(ctx context.Context, id string) ([]string, error) {
 			DataSaver []string `json:"dataSaver"`
 		} `json:"chapter"`
 	}
-	if e := mdGet(ctx, "/at-home/server/"+url.PathEscape(id), &r); e != nil {
-		return nil, e
+
+	if err := mdGet(ctx, "/at-home/server/"+url.PathEscape(id), &r); err != nil {
+		return nil, err
 	}
-	out := []string{}
-	for _, f := range r.Chapter.Data {
-		out = append(out, strings.TrimRight(r.BaseURL, "/")+"/data/"+r.Chapter.Hash+"/"+f)
+
+	if r.BaseURL == "" || r.Chapter.Hash == "" {
+		return nil, fmt.Errorf("MangaDex ไม่ส่งข้อมูล URL หรือ hash ของตอนนี้")
 	}
-	return out, nil
+
+	files := r.Chapter.Data
+	pathType := "data"
+
+	if len(files) == 0 {
+		files = r.Chapter.DataSaver
+		pathType = "data-saver"
+	}
+
+	if len(files) == 0 {
+		return []string{}, nil
+	}
+
+	pages := make([]string, 0, len(files))
+
+	for _, file := range files {
+		if strings.Contains(file, "/") ||
+			strings.Contains(file, "\\") {
+			continue
+		}
+
+		pages = append(
+			pages,
+			strings.TrimRight(r.BaseURL, "/")+
+				"/"+pathType+"/"+r.Chapter.Hash+"/"+file,
+		)
+	}
+
+	return pages, nil
 }
