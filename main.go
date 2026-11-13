@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/joho/godotenv/autoload"
 	"log"
 	"mangahub/auth"
 	"mangahub/handler"
@@ -13,6 +11,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/joho/godotenv/autoload"
 )
 
 func main() {
@@ -49,7 +50,7 @@ func main() {
 	origins := strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",")
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8000"
 	}
 	log.Println("MangaHub API listening on :" + port)
 	log.Fatal(http.ListenAndServe(":"+port, mw.CORS(origins, mux)))
